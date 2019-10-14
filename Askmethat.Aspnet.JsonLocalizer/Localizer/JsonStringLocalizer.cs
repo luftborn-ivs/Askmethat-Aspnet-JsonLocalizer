@@ -1,10 +1,8 @@
 ﻿using Askmethat.Aspnet.JsonLocalizer.Extensions;
 using Askmethat.Aspnet.JsonLocalizer.Format;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Localization;
 using Microsoft.Extensions.Options;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -15,20 +13,21 @@ namespace Askmethat.Aspnet.JsonLocalizer.Localizer
 {
     internal class JsonStringLocalizer : JsonStringLocalizerBase, IStringLocalizer
     {
+        private readonly IHostingEnvironment _env;
 
-        public JsonStringLocalizer(string resourcesRelativePath, IOptions<JsonLocalizationOptions> localizationOptions, string baseName = "") : base(resourcesRelativePath, localizationOptions, baseName)
+        public JsonStringLocalizer(IOptions<JsonLocalizationOptions> localizationOptions, IHostingEnvironment env, string baseName = null) : base(localizationOptions, baseName)
         {
-        }
+            _env = env;
+            resourcesRelativePath = GetJsonRelativePath(_localizationOptions.Value.ResourcesPath);
 
-        public JsonStringLocalizer(IOptions<JsonLocalizationOptions> localizationOptions) : base(localizationOptions)
-        {
+            InitJsonStringLocalizer();
         }
 
         public LocalizedString this[string name]
         {
             get
             {
-                var value = GetString(name);
+                string value = GetString(name);
                 return new LocalizedString(name, value ?? name, resourceNotFound: value == null);
             }
         }
@@ -37,102 +36,117 @@ namespace Askmethat.Aspnet.JsonLocalizer.Localizer
         {
             get
             {
-                var format = GetString(name);
-                var value = GetPluralLocalization(name, format, arguments);
+                string format = GetString(name);
+                string value = GetPluralLocalization(name, format, arguments);
                 return new LocalizedString(name, value, resourceNotFound: format == null);
             }
         }
 
         private string GetPluralLocalization(string name, string format, object[] arguments)
         {
-            var last = arguments.LastOrDefault();
-            string value = string.Empty;
-            if (last != null && last is bool)
+            object last = arguments.LastOrDefault();
+            string value;
+            if (last != null && last is bool boolean)
             {
-                bool isPlural = (bool)last;
+                bool isPlural = boolean;
                 value = GetString(name);
-                if (value.Contains(_localizationOptions.Value.PluralSeparator))
+                if (!string.IsNullOrEmpty(value) && value.Contains(_localizationOptions.Value.PluralSeparator))
                 {
-                    int index = (isPlural ? 1 : 0);
+                    int index = isPlural ? 1 : 0;
                     value = value.Split(_localizationOptions.Value.PluralSeparator)[index];
                 }
                 else
                 {
-                    value = String.Format(format ?? name, arguments);
+                    value = string.Format(format ?? name, arguments);
                 }
             }
             else
             {
-                value = String.Format(format ?? name, arguments);
+                value = string.Format(format ?? name, arguments);
             }
 
             return value;
         }
         public IEnumerable<LocalizedString> GetAllStrings(bool includeParentCultures)
         {
-            return includeParentCultures ? localization
+            return includeParentCultures ? localization?
                     .Select(
                         l =>
                         {
-                            var value = GetString(l.Key);
+                            string value = GetString(l.Key);
                             return new LocalizedString(l.Key, value ?? l.Key, resourceNotFound: value == null);
                         }
-                    ) : 
-                    localization
+                    ) :
+                    localization?
                     .Where(w => !w.Value.IsParent)
                     .Select(
                         l =>
                         {
-                            var value = GetString(l.Key);
+                            string value = GetString(l.Key);
                             return new LocalizedString(l.Key, value ?? l.Key, resourceNotFound: value == null);
                         }
-                    ) 
+                    )
                     ;
-                
+
         }
 
         public IStringLocalizer WithCulture(CultureInfo culture)
         {
-            return new JsonStringLocalizer(_resourcesRelativePath, _localizationOptions);
+            return new JsonStringLocalizer(_localizationOptions, _env);
         }
 
-        string GetString(string name, CultureInfo cultureInfo = null, bool shouldTryDefaultCulture = true)
+        private string GetString(string name, bool shouldTryDefaultCulture = true)
         {
             if (name == null)
             {
                 throw new ArgumentNullException(nameof(name));
             }
 
-            if (cultureInfo == null)
+            if (shouldTryDefaultCulture && !IsUICultureCurrentCulture(CultureInfo.CurrentUICulture))
             {
-                cultureInfo = CultureInfo.CurrentUICulture;
+                InitJsonStringLocalizer(CultureInfo.CurrentUICulture);
+                AddMissingCultureToSupportedCulture(CultureInfo.CurrentUICulture);
+                GetCultureToUse(CultureInfo.CurrentUICulture);
             }
 
-            LocalizatedFormat localizedValue = null;
 
-            if (localization.TryGetValue(name, out localizedValue))
+            if (localization != null && localization.TryGetValue(name, out LocalizatedFormat localizedValue))
             {
-                return localizedValue.Value; 
+                return localizedValue.Value;
             }
 
-            // if (!cultureInfo.Equals(_localizationOptions.Value.DefaultCulture) && !cultureInfo.Equals(cultureInfo.Parent))
-            // {
-            //     Console.Error.WriteLine($"{name} is using parent culture instead of current ui culture");
-            //     //Try the parent culture
-            //     return GetString(name, cultureInfo.Parent, shouldTryDefaultCulture);
-            // }
-
-            // if (shouldTryDefaultCulture && !cultureInfo.Equals(_localizationOptions.Value.DefaultCulture))
-            // {
-            //     Console.Error.WriteLine($"{name} is using default option culture instead of current ui culture");
-            //     //Try the default culture
-            //     return GetString(name, _localizationOptions.Value.DefaultCulture, false);
-            // }
+            if (shouldTryDefaultCulture)
+            {
+                GetCultureToUse(_localizationOptions.Value.DefaultCulture);
+                return GetString(name, false);
+            }
 
             //advert user that current name string does not 
             //contains any translation
-            Console.Error.WriteLine($"{name} does not contains any translation");
+            Console.Error.WriteLine($"{name} does not contain any translation");
             return null;
+        }
+
+        /// <summary>
+        /// Get path of json
+        /// </summary>
+        /// <returns>JSON relative path</returns>
+        private string GetJsonRelativePath(string path)
+        {
+            string fullPath = string.Empty;
+            if (_localizationOptions.Value.IsAbsolutePath)
+            {
+                fullPath = path;
+            }
+            if (!_localizationOptions.Value.IsAbsolutePath && string.IsNullOrEmpty(path))
+            {
+                fullPath = Path.Combine(_env.ContentRootPath, "Resources");
+            }
+            else if (!_localizationOptions.Value.IsAbsolutePath && !string.IsNullOrEmpty(path))
+            {
+                fullPath = Path.Combine(AppContext.BaseDirectory, path2: path);
+            }
+            return fullPath;
         }
     }
 }
